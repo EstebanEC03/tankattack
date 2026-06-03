@@ -33,11 +33,16 @@ public final class Main {
         prolog.initialize();
 
         GameEngine engine = new GameEngine(prolog);
-        engine.loadLevel(initialLevel);
 
         LevelRepository levels = new LevelRepository();
 
+        // Crear el ApiServer (registra el broadcaster como
+        // listener del engine) ANTES de cargar el nivel, para
+        // que el estado inicial quede cacheado en el broadcaster
+        // y los clientes WebSocket lo reciban al conectarse.
         ApiServer server = new ApiServer(engine, levels);
+        engine.loadLevel(initialLevel);
+
         server.start(port);
 
         Runtime.getRuntime().addShutdownHook(new Thread(() -> {

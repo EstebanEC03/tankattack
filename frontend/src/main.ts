@@ -3,6 +3,13 @@
  * Punto de entrada del frontend. Conecta el cliente HTTP+WS
  * con el motor de renderizado, captura entradas, mantiene el
  * HUD sincronizado y orquesta el editor de niveles.
+ *
+ * Modo de juego: tick manual por accion.
+ *   - El backend solo avanza la simulacion cuando el jugador
+ *     envia un MOVE o SHOOT.
+ *   - Pause siempre esta disponible (incluso pausado).
+ *   - Editor se muestra como vista completa al pulsar
+ *     "Editar nivel".
  * ============================================================ */
 
 /// <reference types="vite/client" />
@@ -28,41 +35,69 @@ const input = new InputController();
 
 let lastState: GameState | null = null;
 let renderLoopRunning = false;
+let editorOpen = false;
 
-/* ---------- View switcher ---------- */
+/* ---------- View switcher (Play <-> Editor) ---------- */
 
 const playView = document.getElementById("play-view")!;
 const editorView = document.getElementById("editor-view")!;
-const viewSwitcher = document.getElementById("view-switcher")!;
+const editLevelBtn = document.getElementById("btn-edit-level")!;
+const editorCloseBtn = document.getElementById("editor-close")!;
 
-viewSwitcher.addEventListener("click", (ev) => {
-  const target = ev.target as HTMLElement;
-  if (!target.matches("button")) return;
-  const view = target.dataset.view;
-  if (view === "play") {
-    playView.classList.add("active");
-    editorView.classList.remove("active");
-    viewSwitcher.querySelectorAll("button").forEach((b) =>
-      b.classList.toggle("active", b === target)
-    );
-  } else if (view === "editor") {
-    playView.classList.remove("active");
-    editorView.classList.add("active");
-    viewSwitcher.querySelectorAll("button").forEach((b) =>
-      b.classList.toggle("active", b === target)
-    );
+function showPlayView(): void {
+  editorOpen = false;
+  playView.classList.add("active");
+  playView.classList.remove("hidden");
+  editorView.classList.remove("active");
+  editorView.classList.add("hidden");
+  hud.setEditLevelActive(false);
+  requestAnimationFrame(() => {
+    if (lastState) {
+      renderer.fit(canvas.parentElement?.clientWidth ?? 1280,
+                   canvas.parentElement?.clientHeight ?? 800,
+                   lastState);
+    }
+  });
+}
+
+function showEditorView(): void {
+  editorOpen = true;
+  playView.classList.remove("active");
+  playView.classList.add("hidden");
+  editorView.classList.add("active");
+  editorView.classList.remove("hidden");
+  hud.setEditLevelActive(true);
+  editor.fit();
+  editor.draw();
+  // Escape cierra el editor
+  setTimeout(() => editorCanvas.focus(), 50);
+}
+
+editLevelBtn.addEventListener("click", () => {
+  if (editorOpen) showPlayView();
+  else showEditorView();
+});
+
+editorCloseBtn.addEventListener("click", () => showPlayView());
+
+document.addEventListener("keydown", (ev) => {
+  if (ev.key === "Escape" && editorOpen) {
+    ev.preventDefault();
+    showPlayView();
   }
 });
 
-/* ---------- Renderer loop (60 FPS) ---------- */
+/* ---------- Renderer loop (60 FPS, solo re-dibuja ultimo estado) ---------- */
 
 function tick(now: number): void {
-  if (lastState) {
-    renderer.fit(canvas.parentElement?.clientWidth ?? 640,
-                 canvas.parentElement?.clientHeight ?? 480,
-                 lastState);
+  if (!editorOpen && lastState) {
+    renderer.fit(
+      canvas.parentElement?.clientWidth ?? 1280,
+      canvas.parentElement?.clientHeight ?? 800,
+      lastState
+    );
     renderer.render(lastState, now);
-  } else {
+  } else if (!lastState) {
     renderer.clear();
   }
   if (renderLoopRunning) requestAnimationFrame(tick);
@@ -121,13 +156,7 @@ hud.setOverlayNextHandler(() => {
 
 const editorCanvas = document.getElementById("editor-canvas") as HTMLCanvasElement;
 const editor = new LevelEditor(editorCanvas, client, (levelId) => {
-  client.loadLevel(levelId).then(() => {
-    playView.classList.add("active");
-    editorView.classList.remove("active");
-    viewSwitcher.querySelectorAll("button").forEach((b) =>
-      b.classList.toggle("active", b.dataset.view === "play")
-    );
-  });
+  client.loadLevel(levelId).then(() => showPlayView());
 });
 
 const editorTools = document.querySelectorAll<HTMLButtonElement>(
@@ -159,11 +188,7 @@ document.getElementById("editor-save")?.addEventListener("click", async () => {
     editor.setId(def.id);
   }
   const ok = await editor.save();
-  if (ok) {
-    flashEditorStatus("Nivel guardado");
-  } else {
-    flashEditorStatus("Error al guardar");
-  }
+  flashEditorStatus(ok ? "Nivel guardado" : "Error al guardar");
 });
 
 document.getElementById("editor-load")?.addEventListener("click", async () => {
@@ -174,11 +199,7 @@ document.getElementById("editor-load")?.addEventListener("click", async () => {
     return;
   }
   const ok = await editor.loadById(id);
-  if (ok) {
-    flashEditorStatus(`Cargado: ${id}`);
-  } else {
-    flashEditorStatus(`No se encontro ${id}`);
-  }
+  flashEditorStatus(ok ? `Cargado: ${id}` : `No se encontro ${id}`);
 });
 
 document.getElementById("editor-play")?.addEventListener("click", () => {
@@ -201,13 +222,15 @@ client.connect();
 input.attach();
 
 window.addEventListener("resize", () => {
-  if (lastState) {
-    renderer.fit(canvas.parentElement?.clientWidth ?? 640,
-                 canvas.parentElement?.clientHeight ?? 480,
+  if (lastState && !editorOpen) {
+    renderer.fit(canvas.parentElement?.clientWidth ?? 1280,
+                 canvas.parentElement?.clientHeight ?? 800,
                  lastState);
   }
-  editor.fit();
-  editor.draw();
+  if (editorOpen) {
+    editor.fit();
+    editor.draw();
+  }
 });
 
 // Atajo: clic derecho en el editor rota la direccion del jugador.
@@ -222,8 +245,8 @@ window.addEventListener("DOMContentLoaded", () => {
     if (state) {
       lastState = state;
       hud.update(state);
-      renderer.fit(canvas.parentElement?.clientWidth ?? 640,
-                   canvas.parentElement?.clientHeight ?? 480,
+      renderer.fit(canvas.parentElement?.clientWidth ?? 1280,
+                   canvas.parentElement?.clientHeight ?? 800,
                    state);
       if (!renderLoopRunning) {
         renderLoopRunning = true;
@@ -232,4 +255,5 @@ window.addEventListener("DOMContentLoaded", () => {
     }
   });
   editor.draw();
+  showPlayView();
 });

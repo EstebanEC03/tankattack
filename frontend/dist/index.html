@@ -4,20 +4,17 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Tank Attack — Vaporwave</title>
-    <script type="module" crossorigin src="/assets/index-BmSC6hW8.js"></script>
-    <link rel="stylesheet" crossorigin href="/assets/index-BjLc7AFC.css">
+    <script type="module" crossorigin src="/assets/index-DBN-0GOt.js"></script>
+    <link rel="stylesheet" crossorigin href="/assets/index-DeiFV22g.css">
   </head>
   <body>
     <div id="app">
       <header id="topbar">
         <h1>TANK&nbsp;·&nbsp;ATTACK</h1>
-        <nav id="view-switcher">
-          <button data-view="play" class="active">Jugar</button>
-          <button data-view="editor">Editor</button>
-        </nav>
+        <button id="btn-edit-level" class="topbar-action">Editar nivel</button>
       </header>
 
-      <main id="play-view" class="view active">
+      <main id="play-view" class="view">
         <section id="hud">
           <div class="hud-card">
             <span class="hud-label">VIDAS</span>
@@ -35,14 +32,24 @@
             <span class="hud-label">ENEMIGOS</span>
             <span id="hud-enemies" class="hud-value">0</span>
           </div>
+          <div class="hud-card hud-card-damage hidden" id="hud-card-damage">
+            <span class="hud-label">DAÑO RECIBIDO</span>
+            <span id="hud-damage-flash" class="hud-value">−1</span>
+          </div>
           <div class="hud-card hud-status">
             <span class="hud-label">ESTADO</span>
             <span id="hud-status" class="hud-value">—</span>
           </div>
+          <div class="hud-card hud-info">
+            <span class="hud-label">TURNO</span>
+            <span id="hud-tick" class="hud-value mono">0</span>
+          </div>
         </section>
 
         <div id="game-stage">
-          <canvas id="game-canvas" width="640" height="480"></canvas>
+          <canvas id="game-canvas" width="1280" height="900"></canvas>
+          <div id="damage-flash" class="damage-flash"></div>
+          <div id="toast-container"></div>
           <div id="overlay" class="hidden">
             <div id="overlay-content">
               <h2 id="overlay-title">TANK ATTACK</h2>
@@ -62,9 +69,12 @@
         </aside>
       </main>
 
-      <main id="editor-view" class="view">
-        <section id="editor-toolbar">
+      <main id="editor-view" class="view hidden">
+        <div id="editor-header">
           <h2>Editor de niveles</h2>
+          <button id="editor-close" class="editor-close">× Cerrar</button>
+        </div>
+        <section id="editor-toolbar">
           <div class="editor-tools">
             <button data-tool="WALL">Muro</button>
             <button data-tool="PLAYER">Jugador</button>
@@ -89,7 +99,7 @@
           </div>
         </section>
         <div id="editor-stage">
-          <canvas id="editor-canvas" width="640" height="480"></canvas>
+          <canvas id="editor-canvas" width="1280" height="900"></canvas>
         </div>
       </main>
 

@@ -53,6 +53,11 @@ public final class ApiServer {
         this.engine = engine;
         this.levels = levels;
         this.broadcaster = new WsBroadcaster();
+        // Registramos el broadcaster como listener ANTES de
+        // que el backend emita cualquier estado, para que el
+        // ultimo snapshot siempre este disponible cuando un
+        // cliente WebSocket se conecte.
+        engine.addStateListener(broadcaster);
     }
 
     public WsBroadcaster broadcaster() { return broadcaster; }
@@ -68,7 +73,6 @@ public final class ApiServer {
         });
 
         registerRoutes();
-        engine.addStateListener(broadcaster);
         app.start(port);
         log.info("Servidor Javalin escuchando en puerto {}", port);
         return port;

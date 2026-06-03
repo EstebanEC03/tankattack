@@ -93,8 +93,8 @@ export class LevelEditor {
 
   fit(): void {
     const parent = this.canvas.parentElement;
-    const w = parent ? parent.clientWidth - 32 : 640;
-    const h = 480;
+    const w = parent ? parent.clientWidth - 24 : 1280;
+    const h = parent ? parent.clientHeight - 24 : 800;
     this.camera.configure(this.state.width, this.state.height, w, h);
     this.canvas.width = this.camera.getViewportWidth();
     this.canvas.height = this.camera.getViewportHeight();

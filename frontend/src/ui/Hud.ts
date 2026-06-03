@@ -1,8 +1,8 @@
 /* ============================================================
  * Hud.ts
  * HUD vaporwave: vidas, nivel, objetivos, estado, IA de
- * enemigos. Actualiza el DOM en cada snapshot recibido del
- * backend.
+ * enemigos, indicador de daño. Actualiza el DOM en cada
+ * snapshot recibido del backend.
  * ============================================================ */
 
 import type { GameState, EnemyTank } from "../game/types";
@@ -30,6 +30,7 @@ export class Hud {
   private readonly objectivesEl: HTMLElement;
   private readonly enemiesEl: HTMLElement;
   private readonly statusEl: HTMLElement;
+  private readonly tickEl: HTMLElement;
   private readonly enemyListEl: HTMLElement;
   private readonly overlayEl: HTMLElement;
   private readonly overlayTitleEl: HTMLElement;
@@ -37,10 +38,21 @@ export class Hud {
   private readonly overlayStartBtn: HTMLButtonElement;
   private readonly overlayRestartBtn: HTMLButtonElement;
   private readonly overlayNextBtn: HTMLButtonElement;
+  private readonly damageCard: HTMLElement;
+  private readonly damageFlashEl: HTMLElement;
+  private readonly damageCountEl: HTMLElement;
+  private readonly toastContainer: HTMLElement;
+  private readonly editLevelBtn: HTMLButtonElement;
 
   private lastEnemySig = "";
   private lastStatus = "";
   private lastLevel = 0;
+  private lastLives = 0;
+  private lastPaused = false;
+  private lastGameOver = false;
+  private lastLevelCompleted = false;
+  private lastTick = -1;
+  private damageCount = 0;
 
   constructor() {
     this.livesEl = this.require("#hud-lives");
@@ -48,6 +60,7 @@ export class Hud {
     this.objectivesEl = this.require("#hud-objectives");
     this.enemiesEl = this.require("#hud-enemies");
     this.statusEl = this.require("#hud-status");
+    this.tickEl = this.require("#hud-tick");
     this.enemyListEl = this.require("#enemy-list");
     this.overlayEl = this.require("#overlay");
     this.overlayTitleEl = this.require("#overlay-title");
@@ -55,11 +68,25 @@ export class Hud {
     this.overlayStartBtn = this.require<HTMLButtonElement>("#overlay-start");
     this.overlayRestartBtn = this.require<HTMLButtonElement>("#overlay-restart");
     this.overlayNextBtn = this.require<HTMLButtonElement>("#overlay-next");
+    this.damageCard = this.require("#hud-card-damage");
+    this.damageFlashEl = this.require("#damage-flash");
+    this.damageCountEl = this.require("#hud-damage-flash");
+    this.toastContainer = this.require("#toast-container");
+    this.editLevelBtn = this.require<HTMLButtonElement>("#btn-edit-level");
+    this.damageCard.classList.add("hidden");
   }
 
   /** Llama cuando llega un nuevo estado del backend. */
   update(state: GameState): void {
-    this.livesEl.textContent = String(state.player.lives);
+    // Vidas + deteccion de daño
+    const lives = state.player.lives;
+    if (lives < this.lastLives && this.lastLives > 0) {
+      const lost = this.lastLives - lives;
+      this.onDamageReceived(lost);
+    }
+    this.lastLives = lives;
+    this.livesEl.textContent = String(lives);
+
     if (this.lastLevel !== state.level) {
       this.levelEl.textContent = String(state.level);
       this.lastLevel = state.level;
@@ -67,11 +94,27 @@ export class Hud {
     this.objectivesEl.textContent = String(state.status.activeObjectives);
     this.enemiesEl.textContent = String(state.status.aliveEnemies);
 
+    if (state.status.tick !== this.lastTick) {
+      this.tickEl.textContent = String(state.status.tick);
+      this.lastTick = state.status.tick;
+    }
+
     const statusText = this.computeStatusText(state);
     if (statusText !== this.lastStatus) {
       this.statusEl.textContent = statusText;
       this.lastStatus = statusText;
     }
+
+    // Avisos de cambio de modo
+    if (state.status.paused !== this.lastPaused) {
+      if (state.status.paused) this.showToast("PAUSA", "toast-pause");
+      this.lastPaused = state.status.paused;
+    }
+    if (state.status.gameOver && !this.lastGameOver) {
+      this.damageCard.classList.add("hidden");
+    }
+    this.lastGameOver = state.status.gameOver;
+    this.lastLevelCompleted = state.status.levelCompleted;
 
     const sig = state.enemies
       .map((e) => `${e.id}:${e.action ?? ""}:${e.role ?? ""}:${e.status}`)
@@ -96,6 +139,13 @@ export class Hud {
   }
   setOverlayNextHandler(fn: () => void): void {
     this.overlayNextBtn.onclick = () => fn();
+  }
+  setEditLevelHandler(fn: () => void): void {
+    this.editLevelBtn.onclick = () => fn();
+  }
+
+  setEditLevelActive(active: boolean): void {
+    this.editLevelBtn.classList.toggle("active", active);
   }
 
   setConnectionStatus(status: "connecting" | "connected" | "disconnected"): void {
@@ -169,6 +219,34 @@ export class Hud {
       return;
     }
     this.overlayEl.classList.add("hidden");
+  }
+
+  /** Llamado cuando el jugador recibe daño. */
+  private onDamageReceived(amount: number): void {
+    this.damageCount += amount;
+    this.damageCountEl.textContent = `−${this.damageCount}`;
+    this.damageCard.classList.remove("hidden");
+    // Re-disparar animacion CSS removiendo y re-añadiendo la clase.
+    this.damageCard.style.animation = "none";
+    void this.damageCard.offsetWidth;
+    this.damageCard.style.animation = "";
+
+    this.damageFlashEl.classList.remove("active");
+    void this.damageFlashEl.offsetWidth;
+    this.damageFlashEl.classList.add("active");
+    setTimeout(() => this.damageFlashEl.classList.remove("active"), 400);
+
+    this.showToast(`DAÑO RECIBIDO −${amount}`, "toast-damage");
+  }
+
+  /** Muestra un mensaje corto flotante en la parte superior. */
+  showToast(text: string, variant: "" | "toast-damage" | "toast-pause" = ""): void {
+    const el = document.createElement("div");
+    el.className = "toast";
+    if (variant) el.classList.add(variant);
+    el.textContent = text;
+    this.toastContainer.appendChild(el);
+    setTimeout(() => el.remove(), 1700);
   }
 
   private require<T extends HTMLElement = HTMLElement>(selector: string): T {

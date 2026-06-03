@@ -21,47 +21,47 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CopyOnWriteArrayList;
-import java.util.concurrent.Executors;
-import java.util.concurrent.ScheduledExecutorService;
-import java.util.concurrent.ScheduledFuture;
-import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
- * Motor principal del juego. Se ejecuta en su propio hilo
- * y mantiene un {@link GameState} sincronizado. Cada tick:
+ * Motor principal del juego.
  *
- *   1. Procesa los inputs del jugador encolados.
- *   2. Actualiza las balas.
- *   3. Para cada tanque enemigo vivo: consulta Prolog para
- *      obtener accion y ruta, y avanza siguiendo la ruta.
- *   4. Cada N ticks consulta el plan coordinado y aplica
- *      roles a los enemigos.
- *   5. Detecta fin de nivel / game over.
- *   6. Notifica a los listeners con el nuevo estado.
+ * <p><b>Tick manual basado en acciones del jugador.</b>
+ * A diferencia de un tick autonomo, aqui la simulacion solo
+ * avanza cuando el jugador envia una accion (mover, disparar,
+ * etc). Esto permite que los tanques enemigos se muevan
+ * unicamente cuando el jugador lo hace, manteniendo una
+ * dinamica por turnos visible.</p>
+ *
+ * <p>Cada accion del jugador (cuando el juego no esta en pausa,
+ * game over o nivel completo) ejecuta un tick que:</p>
+ * <ol>
+ *   <li>Aplica el input.</li>
+ *   <li>Avanza las balas.</li>
+ *   <li>Recalcula decisiones y planes coordinados de los
+ *       enemigos cada cierto numero de ticks.</li>
+ *   <li>Avanza los enemigos siguiendo sus rutas.</li>
+ *   <li>Los enemigos disparan si su accion es DISPARAR.</li>
+ *   <li>Detecta fin de nivel / game over.</li>
+ *   <li>Notifica a los listeners (WebSocket).</li>
+ * </ol>
  */
 public final class GameEngine {
 
     private static final Logger log = LoggerFactory.getLogger(GameEngine.class);
 
-    /** Periodo del tick del juego (ms). 20 ticks/segundo. */
-    public static final long TICK_PERIOD_MS = 50;
     /** Cada cuantos ticks se recalculan rutas de enemigos. */
-    public static final int ENEMY_DECISION_INTERVAL = 6;
+    public static final int ENEMY_DECISION_INTERVAL = 1;
     /** Cada cuantos ticks se recalcula el plan coordinado. */
-    public static final int COORDINATION_INTERVAL = 30;
+    public static final int COORDINATION_INTERVAL = 6;
     /** Cooldown entre disparos de cada enemigo (ticks). */
-    public static final int ENEMY_SHOT_COOLDOWN_TICKS = 20;
+    public static final int ENEMY_SHOT_COOLDOWN_TICKS = 4;
 
     private final PrologService prolog;
     private final CollisionManager collisions;
     private final LevelLoader levelLoader;
-    private final ScheduledExecutorService executor;
     private final List<StateListener> listeners = new CopyOnWriteArrayList<>();
-    private final AtomicBoolean running = new AtomicBoolean(false);
 
     private GameState state;
-    private ScheduledFuture<?> tickHandle;
     private long nowNanos;
     private int enemyShotCooldown = 0;
 
@@ -69,11 +69,6 @@ public final class GameEngine {
         this.prolog = prolog;
         this.collisions = new CollisionManager();
         this.levelLoader = new LevelLoader();
-        this.executor = Executors.newSingleThreadScheduledExecutor(r -> {
-            Thread t = new Thread(r, "tank-game-engine");
-            t.setDaemon(true);
-            return t;
-        });
     }
 
     public GameState getState() { return state; }
@@ -91,7 +86,8 @@ public final class GameEngine {
         state.setPaused(false);
         state.setGameOver(false);
         state.setLevelCompleted(false);
-        scheduleLoop();
+        enemyShotCooldown = 0;
+        notifyListeners();
     }
 
     public synchronized void restart() {
@@ -104,14 +100,11 @@ public final class GameEngine {
     }
 
     public synchronized void stopGame() {
-        running.set(false);
-        if (tickHandle != null) tickHandle.cancel(false);
         if (state != null) state.setRunning(false);
     }
 
     public void shutdown() {
         stopGame();
-        executor.shutdownNow();
     }
 
     public synchronized void loadLevel(String levelId) {
@@ -119,6 +112,7 @@ public final class GameEngine {
         if (level == null) throw new IllegalArgumentException("Nivel no encontrado: " + levelId);
         if (state == null) state = new GameState();
         state.configure(level);
+        enemyShotCooldown = 0;
         notifyListeners();
     }
 
@@ -126,22 +120,48 @@ public final class GameEngine {
         if (level == null) throw new IllegalArgumentException("level null");
         if (state == null) state = new GameState();
         state.configure(level);
+        enemyShotCooldown = 0;
         notifyListeners();
     }
 
     /* ============================================================
      * Entradas del jugador
+     *
+     * La simulacion avanza exactamente un tick por cada input
+     * que implique accion (MOVE o SHOOT). Pause y Restart
+     * siempre estan permitidos, incluso con el juego pausado,
+     * para evitar que el jugador quede bloqueado.
      * ============================================================ */
 
     public synchronized void handlePlayerInput(PlayerInput input) {
-        if (state == null || !state.isRunning() || state.isPaused()) return;
-        if (state.isGameOver() || state.isLevelCompleted()) return;
+        if (state == null) return;
 
         switch (input.type()) {
-            case MOVE -> handleMove(input.direction());
-            case SHOOT -> handleShoot();
-            case PAUSE -> state.setPaused(!state.isPaused());
-            case RESTART -> restart();
+            case PAUSE -> {
+                if (state.isGameOver() || state.isLevelCompleted()) return;
+                state.setPaused(!state.isPaused());
+                notifyListeners();
+                return;
+            }
+            case RESTART -> {
+                restart();
+                return;
+            }
+            case MOVE, SHOOT -> {
+                if (!state.isRunning()) return;
+                if (state.isPaused() || state.isGameOver() || state.isLevelCompleted()) {
+                    return;
+                }
+                if (input.type() == PlayerInput.InputType.MOVE) {
+                    handleMove(input.direction());
+                } else {
+                    handleShoot();
+                }
+                // Cada accion del jugador dispara exactamente
+                // un tick de la simulacion: asi los enemigos
+                // solo se mueven cuando el jugador se mueve.
+                tick();
+            }
         }
     }
 
@@ -149,9 +169,7 @@ public final class GameEngine {
         if (dir == null) return;
         PlayerTank p = state.getPlayer();
         if (!p.isAlive()) return;
-        if (collisions.tryMovePlayer(state, dir)) {
-            notifyListeners();
-        }
+        collisions.tryMovePlayer(state, dir);
     }
 
     private void handleShoot() {
@@ -164,7 +182,6 @@ public final class GameEngine {
                 bulletPos, dir, Bullet.DEFAULT_SPEED_TILES_PER_SEC);
         state.addBullet(b);
         p.markShot(nowNanos);
-        notifyListeners();
     }
 
     private static Position bulletSpawn(Position origin, Direction dir) {
@@ -177,19 +194,14 @@ public final class GameEngine {
     }
 
     /* ============================================================
-     * Loop principal
+     * Tick
+     * Avanza la simulacion exactamente una unidad.
+     * Llamado por handlePlayerInput cuando hay accion.
      * ============================================================ */
-
-    private void scheduleLoop() {
-        running.set(true);
-        if (tickHandle != null) tickHandle.cancel(false);
-        tickHandle = executor.scheduleAtFixedRate(this::tick, 0,
-                TICK_PERIOD_MS, TimeUnit.MILLISECONDS);
-    }
 
     void tick() {
         try {
-            if (!running.get() || state == null) return;
+            if (state == null) return;
             if (state.isPaused() || state.isGameOver() || state.isLevelCompleted()) {
                 return;
             }
