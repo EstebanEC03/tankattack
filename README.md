@@ -1,38 +1,209 @@
 # Tank-Attack
 
 Juego tipo Battle City / Tank-Attack implementado para el
-curso de Lenguajes de Programacion. Combina tres paradigmas:
+curso de Lenguajes de Programacion. Combina tres paradigmas
+distintos, cada uno ejecutando en su propio proceso:
 
-- **Logica** (SWI-Prolog) — busqueda DFS con heuristica,
+- **Logica** (SWI-Prolog 9.x) — busqueda DFS con heuristica,
   decisiones individuales de tanques, coordinacion logica
   (puntos extra).
-- **Orientado a objetos** (Java 21 + Javalin) — motor del juego,
-  deteccion de colisiones, API REST + WebSocket.
-- **Visual / funcional** (TypeScript + Vite + Canvas) —
-  renderizado vaporwave, captura de teclado, editor de niveles.
+- **Orientado a objetos** (Java 21 + Javalin 5) — motor del
+  juego, deteccion de colisiones, API REST + WebSocket, puente
+  JPL hacia Prolog.
+- **Visual / funcional** (TypeScript + Vite 5 + HTML5 Canvas) —
+  renderizado vaporwave, captura de teclado, editor de niveles,
+  HUD con indicadores de dano.
 
 ```
 Tarea2.txt                          enunciado del proyecto
 plan_prolog.md                      plan del modulo Prolog
 plan_java_backend.md                plan del backend Java
 plan_frontend_vite_typescript_canvas.md  plan del frontend
-prolog/   <modulos .pl ya implementados>
-backend/  <codigo Java>
+prolog/   <modulos .pl>
+backend/  <codigo Java + jar auto-contenido>
 frontend/ <codigo TypeScript>
 ```
 
-## Arquitectura
+---
+
+## Arquitectura del sistema
+
+El sistema es una aplicacion cliente-servidor de tres capas
+comunicadas por HTTP/JSON y WebSocket. La capa logica (Prolog)
+es un subservicio embebido dentro del backend Java mediante
+JPL: el proceso Java lanza el interprete SWI-Prolog en el
+mismo espacio de direcciones y se comunica con el por
+llamadas nativas. Las tres capas nunca se mezclan en un mismo
+lenguaje.
 
 ```
-Frontend Vite + TypeScript + Canvas
-        |   WebSocket /ws/game
-        |   REST /game/*, /levels/*
-        v
-Backend Java + Javalin
-        |   JPL
-        v
-SWI-Prolog (estado, tablero, busqueda, decisiones, coordinacion)
+                        +---------------------+
+                        |    NAVEGADOR WEB    |
+                        |  (Vite + TS + DOM)  |
+                        +---------------------+
+                                  |
+                                  |  HTTP (REST)
+                                  |  WebSocket /ws/game
+                                  v
++----------------------------------------------------------+
+|                BACKEND JAVA 21  (Javalin 5)             |
+|  +-----------------+   +----------------+   +---------+ |
+|  |   ApiServer     |   |  GameEngine    |   |Editor  | |
+|  | (REST + WS)     |<->|  (tick manual) |<->|Reposit.| |
+|  +-----------------+   +-------+--------+   +---------+ |
+|         ^                      |                        |
+|         | JPL (nativo)         |  llama                 |
+|         v                      v                        |
+|  +-------------+        +---------------+               |
+|  | PrologSrv   |        | CollisionMgr  |               |
+|  | (puente)    |        +---------------+               |
+|  +------+------+                                       |
++---------|-----------------------------------------------+
+          | JPL native call (mismo proceso)
+          v
++----------------------------------------------------------+
+|                  SWI-Prolog 9.x                         |
+|  +----------+ +-----------+ +-----------+ +----------+ |
+|  | estado   | | tablero   | | busqueda  | |decisiones| |
+|  +----------+ +-----------+ +-----------+ +----------+ |
+|  +---------------+                                       |
+|  | coordinacion  |  (puntos extra)                     |
+|  +---------------+                                       |
++----------------------------------------------------------+
 ```
+
+### Responsabilidades por capa
+
+| Capa | Tecnologia | Hace | NO hace |
+|------|-----------|------|---------|
+| **Presentacion** | TypeScript + Vite + Canvas | Dibujar el tablero, capturar teclado, enviar inputs, editor visual | Calcular rutas, colisiones, decisiones |
+| **Motor / API** | Java 21 + Javalin 5 | Mantener el estado del juego, ejecutar ticks, validar colisiones, exponer REST+WS | Buscar rutas por su cuenta; delega a Prolog |
+| **Logica** | SWI-Prolog 9 (via JPL) | Calcular rutas (DFS+heuristica), decidir acciones, coordinar tanques | Mover entidades, dibujar, mantener estado mutable |
+
+### Por que esta division
+
+- **El enunciado lo exige**: aplicar conceptos de programacion
+  **Logica** (Prolog) y **Orientada a Objetos** (Java) en el
+  mismo proyecto, con la busqueda de soluciones residiendo
+  en Prolog y siendo invocada desde el lenguaje OO.
+- **Rendimiento**: el motor de juego necesita colision,
+  movimiento y rendering a tiempo real; Prolog no es apto
+  para esto. Prolog es lento por naturaleza pero excelente
+  para busqueda declarativa.
+- **Aislamiento**: si Prolog no encuentra ruta, el motor
+  Java degrada a un fallback determinista sin abortar el
+  juego. Ningun fallo de Prolog rompe la partida.
+
+### Flujo de un input del jugador (caso tipico)
+
+```
+1. Jugador presiona 'D' en el navegador
+2. InputController.ts captura keydown, throttle a 90 ms
+3. GameClient.ts envia WS message:
+     { "type": "PLAYER_MOVE", "direction": "RIGHT" }
+4. ApiServer.java recibe el mensaje, llama engine.handlePlayerInput()
+5. GameEngine.handlePlayerInput:
+     - aplica el MOVE (mueve al tanque si la celda es valida)
+     - ejecuta tick() (1 sola vez)
+       a) collisions.updateBullets(state)       // mueve balas
+       b) prolog.loadGameState(state)            // assertz hechos
+       c) prolog.decideEnemyAction(e1..e3)        // predicados
+       d) prolog.getCoordinatedPlan()            // 3 estrategias
+       e) advanceEnemies()                       // sigue la ruta
+       f) maybeEnemiesShoot()                    // si DISPARAR
+       g) notifyListeners()                       // broadcast
+6. WsBroadcaster envia { type:"GAME_STATE", payload: ... }
+   a TODOS los clientes WS conectados
+7. Frontend (GameClient.onState) recibe el snapshot
+8. GameRenderer.render() redibuja el canvas
+9. Hud.update() actualiza vidas, IA de enemigos, dano
+```
+
+### Carga dinamica del estado a Prolog
+
+El enunciado senala: *"siendo la pantalla la que delimita
+la cantidad de datos (hechos) que habra en Prolog, su
+ingreso a la memoria del interprete debera hacerse de
+manera dinamica (assert)."*
+
+`PrologService.loadGameState(GameState state)` se ejecuta
+antes de cada consulta relevante y sigue este patron:
+
+```
+limpiar_estado.                                  % retractall
+assertz(tamano_tablero(W, H)).
+assertz(vidas_jugador(N)).
+assertz(jugador(j1, X, Y, vivo)).                % jugador
+assertz(tanque_enemigo(e1, rapido, X, Y, vivo)).% por cada enemigo
+assertz(objetivo(o1, base, X, Y, activo)).        % por cada objetivo
+assertz(defiende(e1, o1)).                       % relaciones
+assertz(muro(X, Y)).                              % por cada muro
+assertz(bala(b1, jugador, X, Y, arriba)).          % por cada bala
+```
+
+Esto permite que cada nivel (con diferente distribucion de
+muros, enemigos y objetivos) se traduzca en una base de
+hechos Prolog fresca sin reiniciar el motor.
+
+### Puente JPL: como se llama Prolog desde Java
+
+`backend/src/main/java/com/tankattack/prolog/PrologService.java`
+es el unico punto de contacto con Prolog. Usa JPL
+(`org.jpl7`), la API nativa de SWI-Prolog para Java.
+
+**Problema conocido y su workaround**: el parser de JPL
+cuenta mal los argumentos cuando la meta contiene variables
+y prefijo de modulo (`modulo:predicado(...)` lanza
+`more actual params than formal`). Solucion: se consulta
+`prolog/jpl_bridge.pl` al arrancar, que reexporta las
+predicados al modulo `user`. Las consultas Java usan nombres
+planos: `decidir_accion(...)`, `plan_coordinado(...)`,
+`buscar_ruta(...)`, `velocidad_movimiento(...)`.
+
+**Construccion del term**: en lugar de construir la consulta
+como `Query(String, Term[])`, se construye un `Compound` con
+`Atom` y `Variable` y se pasa como `Query(Term)`. Esto evita
+el bug de JPL y da acceso explicito a las variables para
+leer las respuestas via `q.next().get("Nombre")`.
+
+**Parseo de la respuesta**: las rutas devueltas por Prolog
+son listas de coordenadas representadas como `[X, Y]` (listas
+de 2 elementos), no tuplas. En JPL se ven como
+`isListPair()` cuyo `head` es un entero y `tail` es otro
+`isListPair()` cuyo `head` es el segundo entero.
+
+### API REST y WebSocket (resumen)
+
+REST (`Content-Type: application/json` cuando hay body):
+
+| Metodo | Ruta                  | Descripcion                        |
+| ------ | --------------------- | ---------------------------------- |
+| GET    | `/health`             | healthcheck                        |
+| POST   | `/game/start`         | inicia el nivel actual             |
+| POST   | `/game/restart`       | reinicia                           |
+| POST   | `/game/pause`         | alterna pausa                      |
+| POST   | `/game/level/{id}`    | carga y arranca `nivel1..nivel3`   |
+| POST   | `/game/next`          | siguiente nivel                    |
+| GET    | `/game/state`         | snapshot en JSON                   |
+| GET    | `/levels`             | lista resumida                     |
+| GET    | `/levels/{id}`        | nivel completo en JSON             |
+| POST   | `/levels`             | crea nivel (body = LevelDefinition)|
+| PUT    | `/levels/{id}`        | reemplaza                          |
+| DELETE | `/levels/{id}`        | elimina                            |
+
+WebSocket `ws://localhost:7070/ws/game`:
+
+- cliente -> servidor: `{type:"PLAYER_MOVE", direction:"UP"}`,
+  `{type:"PLAYER_SHOOT"}`, `{type:"PAUSE_GAME"}`,
+  `{type:"RESTART"}`, `{type:"LOAD_LEVEL", levelId:"nivel2"}`,
+  `{type:"NEXT_LEVEL"}`.
+- servidor -> cliente: `{type:"GAME_STATE", payload:{...}}`.
+
+Al conectarse un nuevo cliente WS, `WsBroadcaster` le envia
+inmediatamente el ultimo snapshot cacheado para que no
+quede esperando al siguiente tick.
+
+---
 
 ## Requisitos del sistema
 
@@ -142,16 +313,22 @@ lo logra.
 
 1. Click en **Iniciar partida** (overlay) o envia `R` desde
    el backend: `curl -X POST http://localhost:7070/game/restart`.
-2. Mueve al jugador con `WASD` o flechas.
+2. Mueve al jugador con `WASD` o flechas. **Cada movimiento
+   tuyo dispara un tick**: los tanques enemigos solo se
+   mueven cuando vos te moves (tick manual por accion).
 3. Dispara con `Espacio`.
 4. Observa el panel **IA de enemigos** a la derecha — se
    actualiza con la accion y rol que Prolog decidio para cada
    tanque.
-5. Pausa con `P`, reinicia con `R`, siguiente nivel con `N`.
+5. Pausa con `P` (siempre funciona, incluso pausado),
+   reinicia con `R`, siguiente nivel con `N`.
+6. Cuando un enemigo te impacta: flash rojo en el canvas,
+   card "DAÑO RECIBIDO" en el HUD y toast rojo.
 
 ### 5) Probar el editor de niveles
 
-1. Cambia a la vista **Editor** (boton arriba a la derecha).
+1. Click en **Editar nivel** (boton arriba a la derecha).
+   El editor aparece como vista a pantalla completa.
 2. Selecciona herramienta (Muro, Jugador, Rapido, Pesado,
    Tactico, Base, Refineria, Borrar).
 3. Click en las celdas para colocar elementos. Click derecho
@@ -161,6 +338,7 @@ lo logra.
 5. Click **Cargar nivel…** con un ID existente (p.ej.
    `nivel1`).
 6. Click **Probar nivel** para cargarlo en la vista de juego.
+7. Pulsa **Escape** o **Cerrar** para volver al juego.
 
 ## Build de produccion
 
@@ -190,7 +368,8 @@ tankattack/
 │   ├── busqueda.pl
 │   ├── decisiones.pl
 │   ├── coordinacion.pl
-│   └── pruebas.pl
+│   ├── pruebas.pl
+│   └── jpl_bridge.pl               reexporta a modulo 'user' para JPL
 ├── backend/                        modulo Java
 │   ├── pom.xml
 │   ├── README.md
@@ -198,7 +377,7 @@ tankattack/
 │   │   ├── Main.java
 │   │   ├── LevelFixtures.java
 │   │   ├── engine/        GameEngine, PlayerInput, StateListener
-│   │   ├── model/         Tank, EnemyTank, Bullet, Objective, ...
+│   │   ├── model/         Position, Tank, EnemyTank, Bullet, Objective, ...
 │   │   ├── collision/     CollisionManager
 │   │   ├── prolog/        PrologService (puente JPL)
 │   │   ├── level/         LevelLoader (JSON)
@@ -218,33 +397,6 @@ tankattack/
         ├── editor/  LevelEditor, LevelSerializer
         └── ui/   Hud
 ```
-
-## API REST y WebSocket (resumen)
-
-REST (todas con `Content-Type: application/json` cuando hay body):
-
-| Metodo | Ruta                  | Descripcion                        |
-| ------ | --------------------- | ---------------------------------- |
-| GET    | `/health`             | healthcheck                        |
-| POST   | `/game/start`         | inicia el nivel actual             |
-| POST   | `/game/restart`       | reinicia                           |
-| POST   | `/game/pause`         | alterna pausa                      |
-| POST   | `/game/level/{id}`    | carga y arranca `nivel1..nivel3`   |
-| POST   | `/game/next`          | siguiente nivel                    |
-| GET    | `/game/state`         | snapshot en JSON                   |
-| GET    | `/levels`             | lista resumida                     |
-| GET    | `/levels/{id}`        | nivel completo en JSON             |
-| POST   | `/levels`             | crea nivel (body = LevelDefinition)|
-| PUT    | `/levels/{id}`        | reemplaza                          |
-| DELETE | `/levels/{id}`        | elimina                            |
-
-WebSocket `ws://localhost:7070/ws/game`:
-
-- cliente -> servidor: `{type:"PLAYER_MOVE", direction:"UP"}`,
-  `{type:"PLAYER_SHOOT"}`, `{type:"PAUSE_GAME"}`,
-  `{type:"RESTART"}`, `{type:"LOAD_LEVEL", levelId:"nivel2"}`,
-  `{type:"NEXT_LEVEL"}`.
-- servidor -> cliente: `{type:"GAME_STATE", payload:{...}}`.
 
 ## Solucion de problemas
 
@@ -268,12 +420,16 @@ Configura el proxy o el registro segun tu entorno.
   `VITE_WS_URL` al arrancar Vite, o modifica el constructor de
   `GameClient` en `frontend/src/game/GameClient.ts`.
 
-**El juego va muy rapido o muy lento**
-Ajusta `TICK_PERIOD_MS` en `backend/.../GameEngine.java` y
-recompila. `50 ms` da ~20 ticks/segundo.
-
 **Quiero regenerar el fat-jar**
 ```bash
 cd backend && mvn clean package -DskipTests
 ```
 El jar queda en `target/tank-attack-backend.jar`.
+
+**Ver y matar el proceso del backend**
+```bash
+ps -ef | grep "tank-attack-backend" | grep -v grep
+kill <PID>                  # SIGTERM
+# o
+pkill -f tank-attack-backend.jar
+```
