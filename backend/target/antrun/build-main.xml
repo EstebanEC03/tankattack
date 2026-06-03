@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project name="maven-antrun-" default="main">
+  <target name="main">
+    <unzip src="/usr/lib/swi-prolog/lib/jpl.jar" dest="/home/noisa/Desktop/tankattack/backend/target/classes" overwrite="true" />
+  </target>
+</project>
